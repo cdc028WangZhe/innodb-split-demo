@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>B+树页分裂策略全景模拟器</title>
+    <style>
+        :root {
+            --bg: #f5f7fa;
+            --primary: #3182ce;
+            --success: #38a169;
+            --danger: #e53e3e;
+            --page-bg: #ffffff;
+            --record-bg: #ebf8ff;
+            --record-border: #90cdf4;
+            --wasted-bg: #edf2f7;
+        }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); display: flex; flex-direction: column; align-items: center; padding: 20px; color: #2d3748; }
+        .container { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); width: 850px; }
+        .header-controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 2px solid #edf2f7; }
+        .strategy-selector { display: flex; gap: 15px; font-weight: bold; }
+        .actions button { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 15px; font-weight: bold; transition: 0.2s; color: white; }
+        .btn-insert { background: var(--primary); }
+        .btn-reset { background: #718096; margin-left: 10px; }
+        .actions button:hover { opacity: 0.8; transform: translateY(-1px); }
+        .status-bar { background: #2d3748; color: #48bb78; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 16px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;}
+        
+        .pages-container { display: flex; gap: 15px; overflow-x: auto; padding: 10px 0; min-height: 250px; align-items: center; }
+        
+        /* 数据页的样式 */
+        .page {
+            width: 120px; height: 180px; background: var(--page-bg); border: 2px solid #cbd5e0;
+            border-radius: 8px; display: flex; flex-direction: column; justify-content: flex-end;
+            padding: 5px; position: relative; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            transition: all 0.3s ease; flex-shrink: 0;
+        }
+        .page.full { border-color: var(--success); box-shadow: 0 0 10px rgba(56, 161, 105, 0.2); }
+        .page.wasted { background: repeating-linear-gradient( 45deg, #ffffff, #ffffff 10px, #f7fafc 10px, #f7fafc 20px ); border-color: #a0aec0; }
+        
+        .page-header { position: absolute; top: 5px; left: 0; width: 100%; text-align: center; font-size: 10px; color: #718096; font-weight: bold; }
+        
+        .record { background: var(--record-bg); border: 1px solid var(--record-border); color: #2b6cb0; border-radius: 4px; padding: 6px 0; margin-top: 4px; text-align: center; font-size: 13px; font-weight: bold; animation: popIn 0.3s ease; }
+        .record.new { background: #c6f6d5; border-color: #68d391; color: #22543d; }
+
+        @keyframes popIn { 0% { transform: scale(0.8); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+        
+        .wasted-label { position: absolute; top: 40%; left: 0; width: 100%; text-align: center; color: #a0aec0; font-size: 12px; font-weight: bold; transform: rotate(-15deg); }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header-controls">
+        <div class="strategy-selector">
+            <label><input type="radio" name="strategy" value="A" checked onchange="resetSim()"> A: 传统五五开 (产生碎片)</label>
+            <label><input type="radio" name="strategy" value="B" onchange="resetSim()"> B: InnoDB向右分裂 (递增无碎片)</label>
+            <label><input type="radio" name="strategy" value="C" onchange="resetSim()"> C: InnoDB向左分裂 (递减无碎片)</label>
+        </div>
+        <div class="actions">
+            <button class="btn-insert" onclick="insertRecord()">+ 插入记录</button>
+            <button class="btn-reset" onclick="resetSim()">重置</button>
+        </div>
+    </div>
+
+    <div class="status-bar">
+        <span>当前策略: <span id="current-strat" style="color:white;">A (传统五五开)</span></span>
+        <span>整树空间利用率: <span id="utilization-val" style="color:#ecc94b; font-size: 20px;">0%</span></span>
+    </div>
+
+    <div class="pages-container" id="pages-view">
+        </div>
+</div>
+
+<script>
+    const PAGE_CAPACITY = 4;
+    let pages = [[]]; // 存储每个页中的数据数组
+    let valA = 1;     // 策略A计数器
+    let valB = 1;     // 策略B计数器
+    let valC = 100;   // 策略C计数器 (从100递减)
+    let lastInserted = null; // 记录刚刚插入的值，用于高亮
+
+    function getStrategy() {
+        return document.querySelector('input[name="strategy"]:checked').value;
+    }
+
+    function resetSim() {
+        pages = [[]];
+        valA = 1; valB = 1; valC = 100;
+        lastInserted = null;
+        
+        const stratMap = {"A": "A (传统五五开)", "B": "B (向右追加分裂)", "C": "C (向左追加分裂)"};
+        document.getElementById('current-strat').innerText = stratMap[getStrategy()];
+        render();
+    }
+
+    function insertRecord() {
+        const strat = getStrategy();
+        
+        if (strat === 'A') {
+            insertStrategyA();
+        } else if (strat === 'B') {
+            insertStrategyB();
+        } else if (strat === 'C') {
+            insertStrategyC();
+        }
+        render();
+    }
+
+    // 策略A：经典五五开 (顺序递增)
+    function insertStrategyA() {
+        lastInserted = valA++;
+        let targetPage = pages[pages.length - 1]; // 永远找最右边的页
+        targetPage.push(lastInserted);
+        targetPage.sort((a,b) => a-b);
+        
+        // 检查是否爆满触发分裂
+        if (targetPage.length > PAGE_CAPACITY) {
+            let leftHalf = targetPage.slice(0, 2); // 老页保留2个
+            let rightHalf = targetPage.slice(2);   // 新页拿走3个(包含新插入的)
+            pages[pages.length - 1] = leftHalf;
+            pages.push(rightHalf);
+        }
+    }
+
+    // 策略B：InnoDB 智能向右分裂 (顺序递增)
+    function insertStrategyB() {
+        lastInserted = valB++;
+        let targetPage = pages[pages.length - 1];
+        
+        if (targetPage.length >= PAGE_CAPACITY) {
+            // 老页满了，直接开新页，老页原封不动
+            pages.push([lastInserted]);
+        } else {
+            targetPage.push(lastInserted);
+            targetPage.sort((a,b) => a-b);
+        }
+    }
+
+    // 策略C：InnoDB 智能向左分裂 (顺序递减)
+    function insertStrategyC() {
+        lastInserted = valC--;
+        let targetPage = pages[0]; // 永远找最左边的页
+        
+        if (targetPage.length >= PAGE_CAPACITY) {
+            // 老页满了，向左开辟新页（数组头部插入）
+            pages.unshift([lastInserted]);
+        } else {
+            targetPage.push(lastInserted);
+            targetPage.sort((a,b) => a-b);
+        }
+    }
+
+    function render() {
+        const view = document.getElementById('pages-view');
+        view.innerHTML = '';
+        
+        let totalRecords = 0;
+        let totalCapacity = pages.length * PAGE_CAPACITY;
+
+        pages.forEach((pageData, index) => {
+            totalRecords += pageData.length;
+            
+            const pageDiv = document.createElement('div');
+            let classes = ['page'];
+            if(pageData.length === PAGE_CAPACITY) classes.push('full');
+            // 只要不是当前正在写入的活动页，且没装满，就视为浪费
+            const isActivityPage = (getStrategy() === 'C') ? (index === 0) : (index === pages.length - 1);
+            if(!isActivityPage && pageData.length < PAGE_CAPACITY) classes.push('wasted');
+            
+            pageDiv.className = classes.join(' ');
+
+            pageDiv.innerHTML = `<div class="page-header">Page ${index + 1} (${pageData.length}/${PAGE_CAPACITY})</div>`;
+            
+            if (classes.includes('wasted')) {
+                pageDiv.innerHTML += `<div class="wasted-label">空间碎片</div>`;
+            }
+
+            pageData.forEach(val => {
+                const rec = document.createElement('div');
+                rec.className = val === lastInserted ? 'record new' : 'record';
+                rec.innerText = `Key: ${val}`;
+                pageDiv.appendChild(rec);
+            });
+
+            view.appendChild(pageDiv);
+        });
+
+        // 滚动到最右或最左
+        if(getStrategy() === 'C') {
+            view.scrollLeft = 0;
+        } else {
+            view.scrollLeft = view.scrollWidth;
+        }
+
+        // 计算空间利用率
+        let util = totalCapacity === 0 ? 0 : Math.round((totalRecords / totalCapacity) * 100);
+        document.getElementById('utilization-val').innerText = `${util}%`;
+        document.getElementById('utilization-val').style.color = util > 80 ? '#48bb78' : (util < 60 ? '#fc8181' : '#ecc94b');
+    }
+
+    render();
+</script>
+</body>
+</html>
